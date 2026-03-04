@@ -487,9 +487,65 @@ def _extract_full_guide_pipe_price(html: str, label_pattern: str) -> Optional[fl
     return float(match.group(1).replace(",", ""))
 
 
+def _extract_full_price_guide_line_price(html: str, label_pattern: str) -> Optional[float]:
+    # Prefer the "Full Price Guide" section where each grade appears as "Grade 9 $19.38".
+    section_match = re.search(r"Full\s+Price\s+Guide", html, flags=re.IGNORECASE)
+    scope = html[section_match.start() : section_match.start() + 12000] if section_match else html
+    pattern = re.compile(
+        rf"{label_pattern}\s+\$(\d{{1,3}}(?:,\d{{3}})*(?:\.\d{{2}})?)",
+        re.IGNORECASE,
+    )
+    match = pattern.search(scope)
+    if not match:
+        return None
+    return float(match.group(1).replace(",", ""))
+
+
+def _extract_compare_row_prices(html: str) -> dict[str, Optional[float]]:
+    # Parse the common compare-prices layout where labels are one row and values are the next row.
+    # Example labels: Ungraded | Grade 7 | Grade 8 | Grade 9 | Grade 9.5 | PSA 10
+    # Example values: $6.28 | - | - | $17.95 | $20.00 | $60.30
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"\s+", " ", text)
+
+    header = re.search(
+        r"Ungraded\s+Grade\s*7\s+Grade\s*8\s+Grade\s*9(?:\s+Grade\s*9\.?5)?\s+PSA\s*10",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not header:
+        return {"ungraded": None, "grade_9": None, "psa_10": None}
+
+    tail = text[header.end() : header.end() + 2500]
+    token_pattern = re.compile(
+        r"(?<![+\-])\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)|(?<![+\-])-(?![\d$])"
+    )
+    tokens: list[Optional[float]] = []
+    for match in token_pattern.finditer(tail):
+        if match.group(1):
+            tokens.append(float(match.group(1).replace(",", "")))
+        else:
+            tokens.append(None)
+        if len(tokens) >= 6:
+            break
+
+    if len(tokens) < 6:
+        return {"ungraded": None, "grade_9": None, "psa_10": None}
+
+    return {
+        "ungraded": tokens[0],
+        "grade_9": tokens[3],
+        "psa_10": tokens[5],
+    }
+
+
 def _parse_ungraded_from_card_page(html: str) -> Optional[float]:
+    compare = _extract_compare_row_prices(html).get("ungraded")
+    if compare is not None:
+        return compare
     return (
-        _extract_price_from_label_value_cell(html, r"Ungraded")
+        _extract_full_price_guide_line_price(html, r"Ungraded")
+        or _extract_price_from_label_value_cell(html, r"Ungraded")
         or _extract_row_scoped_price(html, r"Ungraded")
         or _extract_label_price_fallback(html, r"Ungraded")
         or _extract_full_guide_pipe_price(html, r"Ungraded")
@@ -497,8 +553,12 @@ def _parse_ungraded_from_card_page(html: str) -> Optional[float]:
 
 
 def _parse_grade9_from_card_page(html: str) -> Optional[float]:
+    compare = _extract_compare_row_prices(html).get("grade_9")
+    if compare is not None:
+        return compare
     return (
-        _extract_price_from_label_value_cell(html, r"Grade\s*9(?!\s*\.?5)")
+        _extract_full_price_guide_line_price(html, r"Grade\s*9(?!\s*\.?5)")
+        or _extract_price_from_label_value_cell(html, r"Grade\s*9(?!\s*\.?5)")
         or _extract_row_scoped_price(html, r"Grade\s*9(?!\s*\.?5)")
         or _extract_label_price_fallback(html, r"Grade\s*9(?!\s*\.?5)")
         or _extract_full_guide_pipe_price(html, r"Grade\s*9(?!\s*\.?5)")
@@ -506,8 +566,12 @@ def _parse_grade9_from_card_page(html: str) -> Optional[float]:
 
 
 def _parse_psa10_from_card_page(html: str) -> Optional[float]:
+    compare = _extract_compare_row_prices(html).get("psa_10")
+    if compare is not None:
+        return compare
     return (
-        _extract_price_from_label_value_cell(html, r"PSA\s*10")
+        _extract_full_price_guide_line_price(html, r"PSA\s*10")
+        or _extract_price_from_label_value_cell(html, r"PSA\s*10")
         or _extract_row_scoped_price(html, r"PSA\s*10")
         or _extract_label_price_fallback(html, r"PSA\s*10")
         or _extract_full_guide_pipe_price(html, r"PSA\s*10")
