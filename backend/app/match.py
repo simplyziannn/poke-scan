@@ -206,7 +206,9 @@ def match_cards(
         details = fetch_card_price_details(ranked[0].price_source_url)
         if details.get("ungraded") is not None:
             ranked[0].market_price_usd = details.get("ungraded")
-        ranked[0].grade_9_price_usd = details.get("grade_9")
-        ranked[0].psa_10_price_usd = details.get("psa_10")
+        if details.get("grade_9") is not None:
+            ranked[0].grade_9_price_usd = details.get("grade_9")
+        if details.get("psa_10") is not None:
+            ranked[0].psa_10_price_usd = details.get("psa_10")
 
     return ranked[:3]

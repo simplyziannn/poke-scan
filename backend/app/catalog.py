@@ -152,17 +152,21 @@ def _fetch_html(url: str) -> str:
         if "pricecharting.com" not in url:
             raise URLError(str(exc)) from exc
 
-        mirror = url.replace("https://", "https://r.jina.ai/http://", 1)
-        mirror_headers = {
-            "User-Agent": request_headers["User-Agent"],
-            "Accept": "text/plain,text/html;q=0.9,*/*;q=0.8",
-        }
         try:
-            mirror_request = Request(url=mirror, headers=mirror_headers)
-            with urlopen(mirror_request, timeout=20) as response:
-                return response.read().decode("utf-8", errors="ignore")
+            return _fetch_html_mirror(url, user_agent=request_headers["User-Agent"])
         except (URLError, HTTPError, TimeoutError) as mirror_exc:
             raise URLError(f"{exc}; mirror_failed={mirror_exc}") from mirror_exc
+
+
+def _fetch_html_mirror(url: str, user_agent: str = "Mozilla/5.0 (compatible; poke-scan/0.1; +http://localhost)") -> str:
+    mirror = url.replace("https://", "https://r.jina.ai/http://", 1)
+    mirror_headers = {
+        "User-Agent": user_agent,
+        "Accept": "text/plain,text/html;q=0.9,*/*;q=0.8",
+    }
+    mirror_request = Request(url=mirror, headers=mirror_headers)
+    with urlopen(mirror_request, timeout=20) as response:
+        return response.read().decode("utf-8", errors="ignore")
 
 
 def _parse_number_index(name: str, href: str) -> Optional[str]:
@@ -530,6 +534,26 @@ def fetch_card_price_details(source_url: str, force_refresh: bool = False) -> di
         _parse_grade9_from_card_page(html),
         _parse_psa10_from_card_page(html),
     )
+
+    # Direct fetch can return a reduced page that omits graded rows.
+    # Retry via text mirror when graded values are missing.
+    if grade_9 is None and psa_10 is None and "pricecharting.com" in source_url:
+        try:
+            mirror_html = _fetch_html_mirror(source_url)
+            mirror_ungraded, mirror_grade_9, mirror_psa_10 = _sanitize_price_triplet(
+                _parse_ungraded_from_card_page(mirror_html),
+                _parse_grade9_from_card_page(mirror_html),
+                _parse_psa10_from_card_page(mirror_html),
+            )
+            if mirror_ungraded is not None:
+                ungraded = mirror_ungraded
+            if mirror_grade_9 is not None:
+                grade_9 = mirror_grade_9
+            if mirror_psa_10 is not None:
+                psa_10 = mirror_psa_10
+        except (URLError, HTTPError, TimeoutError):
+            pass
+
     details = {"ungraded": ungraded, "grade_9": grade_9, "psa_10": psa_10}
     # Avoid sticky negative cache entries where all fields are missing.
     if any(value is not None for value in details.values()):
