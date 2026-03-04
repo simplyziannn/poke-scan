@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,51 +70,21 @@ def _fetch_html(url: str) -> str:
         request = Request(url=url, headers=request_headers)
         with urlopen(request, timeout=10) as response:
             return response.read().decode("utf-8", errors="ignore")
-    except (URLError, HTTPError, TimeoutError):
-        cmd = [
-            "curl",
-            "-L",
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--http1.1",
-            "--retry",
-            "2",
-            "--retry-delay",
-            "1",
-            "--max-time",
-            "15",
-            "-A",
-            request_headers["User-Agent"],
-            "-H",
-            f"Accept-Language: {request_headers['Accept-Language']}",
-            url,
-        ]
-        try:
-            out = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            return out.stdout
-        except (subprocess.SubprocessError, FileNotFoundError) as exc:
-            if "pricecharting.com" in url:
-                mirror = url.replace("https://", "https://r.jina.ai/http://", 1)
-                mirror_cmd = [
-                    "curl",
-                    "-L",
-                    "--fail",
-                    "--silent",
-                    "--show-error",
-                    "--http1.1",
-                    "--max-time",
-                    "20",
-                    "-A",
-                    request_headers["User-Agent"],
-                    mirror,
-                ]
-                try:
-                    mirrored = subprocess.run(mirror_cmd, check=True, capture_output=True, text=True)
-                    return mirrored.stdout
-                except (subprocess.SubprocessError, FileNotFoundError) as mirror_exc:
-                    raise URLError(f"{exc}; mirror_failed={mirror_exc}") from mirror_exc
+    except (URLError, HTTPError, TimeoutError) as exc:
+        if "pricecharting.com" not in url:
             raise URLError(str(exc)) from exc
+
+        mirror = url.replace("https://", "https://r.jina.ai/http://", 1)
+        mirror_headers = {
+            "User-Agent": request_headers["User-Agent"],
+            "Accept": "text/plain,text/html;q=0.9,*/*;q=0.8",
+        }
+        try:
+            mirror_request = Request(url=mirror, headers=mirror_headers)
+            with urlopen(mirror_request, timeout=20) as response:
+                return response.read().decode("utf-8", errors="ignore")
+        except (URLError, HTTPError, TimeoutError) as mirror_exc:
+            raise URLError(f"{exc}; mirror_failed={mirror_exc}") from mirror_exc
 
 
 def _parse_number_index(name: str, href: str) -> Optional[str]:
