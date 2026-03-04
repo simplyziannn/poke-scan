@@ -99,6 +99,16 @@ def _normalize_filename_hint(filename_hint: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def _is_low_quality_name(name: Optional[str]) -> bool:
+    if not name:
+        return True
+    cleaned = name.strip()
+    if len(cleaned) < 3:
+        return True
+    alpha_count = sum(char.isalpha() for char in cleaned)
+    return alpha_count < 3
+
+
 def match_cards(
     extracted_number: Optional[str],
     extracted_name: Optional[str],
@@ -110,7 +120,7 @@ def match_cards(
     extracted_indexes = _collector_index_candidates(extracted_number)
     extracted_denominator = _collector_denominator(extracted_number)
     fallback_name = _normalize_filename_hint(filename_hint)
-    effective_name = extracted_name or fallback_name
+    effective_name = fallback_name if _is_low_quality_name(extracted_name) else extracted_name
     if not cards and extracted_index:
         fallback = find_card_by_number_online(extracted_index)
         if fallback:

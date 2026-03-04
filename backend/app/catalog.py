@@ -274,6 +274,23 @@ def _load_persisted_cards() -> list[CatalogCard]:
     return [card for card in cards if card.card_id and card.name and card.number_index]
 
 
+def _merge_cards(primary: list[CatalogCard], secondary: list[CatalogCard]) -> list[CatalogCard]:
+    merged: dict[str, CatalogCard] = {}
+
+    for card in secondary:
+        merged[card.card_id] = card
+
+    for card in primary:
+        existing = merged.get(card.card_id)
+        if not existing:
+            merged[card.card_id] = card
+            continue
+        if existing.market_price_usd is None and card.market_price_usd is not None:
+            merged[card.card_id] = card
+
+    return list(merged.values())
+
+
 def load_nihil_zero_catalog(force_refresh: bool = False) -> list[CatalogCard]:
     now = time.time()
     cached_at = float(_CACHE["fetched_at"])
@@ -285,14 +302,16 @@ def load_nihil_zero_catalog(force_refresh: bool = False) -> list[CatalogCard]:
     try:
         parsed_cards, pages_fetched = _fetch_set_pages()
         if parsed_cards:
+            persisted_cards = _load_persisted_cards()
+            merged_cards = _merge_cards(parsed_cards, persisted_cards)
             _CACHE["fetched_at"] = now
-            _CACHE["cards"] = parsed_cards
-            _persist_cards(parsed_cards)
+            _CACHE["cards"] = merged_cards
+            _persist_cards(merged_cards)
             _META["last_error"] = None
             _META["last_error_detail"] = None
             _META["last_sync_source"] = "live_set_page"
             _META["pages_fetched"] = pages_fetched
-            return parsed_cards
+            return merged_cards
     except (URLError, HTTPError, TimeoutError) as exc:
         _META["last_error"] = "network_error_set_page"
         _META["last_error_detail"] = str(exc)
