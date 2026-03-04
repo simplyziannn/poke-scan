@@ -37,7 +37,17 @@ SET_CONFIGS: dict[str, SetConfig] = {
         set_max_index=120,
         collector_denominator="080",
         search_query_base="pokemon japanese nihil zero",
-    )
+    ),
+    "inferno-x": SetConfig(
+        key="inferno-x",
+        set_name="Pokemon Japanese Inferno X",
+        set_url="https://www.pricecharting.com/console/pokemon-japanese-inferno-x",
+        slug_path="pokemon-japanese-inferno-x",
+        cache_filename="inferno_x_cache.json",
+        set_max_index=200,
+        collector_denominator=None,
+        search_query_base="pokemon japanese inferno x",
+    ),
 }
 
 
@@ -111,13 +121,13 @@ def _parse_price(text: str) -> Optional[float]:
 def _sanitize_price_triplet(
     ungraded: Optional[float], grade_9: Optional[float], psa_10: Optional[float]
 ) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    # Guard against parser drift where PSA10 gets parsed as Ungraded value.
+    # Guard against parser drift where graded values get parsed as Ungraded.
+    if grade_9 is not None and ungraded is not None and abs(grade_9 - ungraded) < 0.001:
+        grade_9 = None
     if (
         psa_10 is not None
         and ungraded is not None
         and abs(psa_10 - ungraded) < 0.001
-        and grade_9 is not None
-        and grade_9 > ungraded * 1.15
     ):
         psa_10 = None
     return ungraded, grade_9, psa_10
