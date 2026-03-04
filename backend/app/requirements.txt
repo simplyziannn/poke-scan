@@ -1,0 +1,7 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+pydantic==2.11.1
+python-multipart==0.0.20
+pytesseract==0.3.13
+Pillow==11.2.1
+rapidfuzz==3.12.2
