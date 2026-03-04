@@ -41,12 +41,12 @@ def _number_score(
     if not extracted_number or not extracted_index:
         return 0.0
 
-    if extracted_denominator and extracted_denominator != SET_DENOMINATOR:
-        return 0.0
-
     normalized_catalog = catalog_index.lstrip("0") or "0"
     if extracted_index == normalized_catalog:
-        return 0.78
+        # Strong signal even if denominator OCR is noisy.
+        if extracted_denominator == SET_DENOMINATOR:
+            return 0.78
+        return 0.62
 
     return 0.0
 
@@ -56,7 +56,7 @@ def match_cards(extracted_number: Optional[str], extracted_name: Optional[str]) 
 
     extracted_index = _collector_index(extracted_number)
     extracted_denominator = _collector_denominator(extracted_number)
-    if not cards and extracted_index and extracted_denominator == SET_DENOMINATOR:
+    if not cards and extracted_index:
         fallback = find_card_by_number_online(extracted_index)
         if fallback:
             cards = [fallback]
@@ -92,7 +92,7 @@ def match_cards(extracted_number: Optional[str], extracted_name: Optional[str]) 
     ranked = sorted(candidates, key=lambda item: item.confidence, reverse=True)
 
     # If the synced catalog is partial or misses a specific number, resolve directly from online search.
-    if extracted_index and extracted_denominator == SET_DENOMINATOR:
+    if extracted_index:
         needs_online_lookup = not ranked or ranked[0].confidence < 0.74
         if needs_online_lookup:
             fallback = find_card_by_number_online(extracted_index)
@@ -119,7 +119,7 @@ def match_cards(extracted_number: Optional[str], extracted_name: Optional[str]) 
                     )
                 ]
 
-    if not extracted_number and ranked and ranked[0].confidence < 0.24:
+    if not extracted_number and ranked and ranked[0].confidence < 0.16:
         return []
 
     if ranked and ranked[0].price_source_url:
