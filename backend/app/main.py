@@ -62,7 +62,11 @@ async def identify(image: UploadFile = File(...)) -> IdentifyResponse:
         raise HTTPException(status_code=400, detail="Empty image payload")
 
     ocr_result = run_ocr(payload)
-    candidates = match_cards(ocr_result.extracted_number, ocr_result.extracted_name)
+    candidates = match_cards(
+        ocr_result.extracted_number,
+        ocr_result.extracted_name,
+        filename_hint=image.filename,
+    )
 
     return IdentifyResponse(
         extracted_number=ocr_result.extracted_number,

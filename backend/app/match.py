@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from rapidfuzz import fuzz
@@ -15,6 +16,32 @@ def _collector_index(extracted_number: Optional[str]) -> Optional[str]:
         return None
     left = extracted_number.split("/", 1)[0].strip()
     return left.lstrip("0") or "0"
+
+
+def _collector_index_candidates(extracted_number: Optional[str]) -> list[str]:
+    if not extracted_number:
+        return []
+
+    left_raw = extracted_number.split("/", 1)[0].strip()
+    digits = "".join(char for char in left_raw if char.isdigit())
+    if not digits:
+        return []
+
+    candidates: list[str] = []
+
+    def _push(value: str) -> None:
+        normalized = value.lstrip("0") or "0"
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    _push(digits)
+
+    # OCR can prepend garbage digits (e.g. 703/080 instead of 54/080).
+    if len(digits) >= 3:
+        _push(digits[-2:])
+        _push(digits[-3:])
+
+    return candidates
 
 
 def _collector_denominator(extracted_number: Optional[str]) -> Optional[str]:
@@ -36,26 +63,54 @@ def _name_score(extracted_name: Optional[str], catalog_name: str) -> float:
 
 
 def _number_score(
-    extracted_number: Optional[str], extracted_index: Optional[str], extracted_denominator: Optional[str], catalog_index: str
+    extracted_number: Optional[str],
+    extracted_indexes: list[str],
+    extracted_denominator: Optional[str],
+    catalog_index: str,
 ) -> float:
-    if not extracted_number or not extracted_index:
+    if not extracted_number or not extracted_indexes:
         return 0.0
 
     normalized_catalog = catalog_index.lstrip("0") or "0"
-    if extracted_index == normalized_catalog:
-        # Strong signal even if denominator OCR is noisy.
+    if normalized_catalog in extracted_indexes:
+        primary_index = extracted_indexes[0]
+        if primary_index == normalized_catalog:
+            # Strong signal even if denominator OCR is noisy.
+            if extracted_denominator == SET_DENOMINATOR:
+                return 0.78
+            return 0.62
+        # Recovered from noisy leading digits; still a strong signal.
         if extracted_denominator == SET_DENOMINATOR:
-            return 0.78
-        return 0.62
+            return 0.70
+        return 0.55
 
     return 0.0
 
 
-def match_cards(extracted_number: Optional[str], extracted_name: Optional[str]) -> list[Candidate]:
+def _normalize_filename_hint(filename_hint: Optional[str]) -> Optional[str]:
+    if not filename_hint:
+        return None
+    base = filename_hint.rsplit("/", 1)[-1]
+    base = base.rsplit(".", 1)[0]
+    normalized = re.sub(r"[_\-]+", " ", base).strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    if len(normalized) < 3:
+        return None
+    return normalized
+
+
+def match_cards(
+    extracted_number: Optional[str],
+    extracted_name: Optional[str],
+    filename_hint: Optional[str] = None,
+) -> list[Candidate]:
     cards = load_nihil_zero_catalog()
 
     extracted_index = _collector_index(extracted_number)
+    extracted_indexes = _collector_index_candidates(extracted_number)
     extracted_denominator = _collector_denominator(extracted_number)
+    fallback_name = _normalize_filename_hint(filename_hint)
+    effective_name = extracted_name or fallback_name
     if not cards and extracted_index:
         fallback = find_card_by_number_online(extracted_index)
         if fallback:
@@ -67,8 +122,8 @@ def match_cards(extracted_number: Optional[str], extracted_name: Optional[str]) 
     candidates: list[Candidate] = []
 
     for card in cards:
-        confidence = _number_score(extracted_number, extracted_index, extracted_denominator, card.number_index)
-        confidence += _name_score(extracted_name, card.name)
+        confidence = _number_score(extracted_number, extracted_indexes, extracted_denominator, card.number_index)
+        confidence += _name_score(effective_name, card.name)
 
         if confidence < 0.09:
             continue
@@ -98,10 +153,10 @@ def match_cards(extracted_number: Optional[str], extracted_name: Optional[str]) 
             fallback = find_card_by_number_online(extracted_index)
             if fallback:
                 fallback_confidence = 0.90
-                if extracted_name:
+                if effective_name:
                     fallback_confidence = max(
                         0.90,
-                        min(0.99, 0.78 + _name_score(extracted_name, fallback.name)),
+                        min(0.99, 0.78 + _name_score(effective_name, fallback.name)),
                     )
                 return [
                     Candidate(
@@ -119,7 +174,7 @@ def match_cards(extracted_number: Optional[str], extracted_name: Optional[str]) 
                     )
                 ]
 
-    if not extracted_number and ranked and ranked[0].confidence < 0.16:
+    if not extracted_number and not effective_name and ranked and ranked[0].confidence < 0.16:
         return []
 
     if ranked and ranked[0].price_source_url:

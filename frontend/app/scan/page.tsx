@@ -71,7 +71,10 @@ async function preprocessImage(file: File): Promise<File> {
 }
 
 export default function ScanPage() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+  const rawApiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+  const apiBaseUrl = rawApiBaseUrl.startsWith("http://") || rawApiBaseUrl.startsWith("https://")
+    ? rawApiBaseUrl
+    : `https://${rawApiBaseUrl}`;
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<IdentifyResponse | null>(null);
