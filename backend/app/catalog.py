@@ -495,17 +495,19 @@ def _parse_psa10_from_card_page(html: str) -> Optional[float]:
     )
 
 
-def fetch_card_price_details(source_url: str) -> dict[str, Optional[float]]:
+def fetch_card_price_details(source_url: str, force_refresh: bool = False) -> dict[str, Optional[float]]:
     now = time.time()
     cached = _PRICE_DETAIL_CACHE.get(source_url)
-    if cached and now - cached[0] < _PRICE_DETAIL_CACHE_TTL_SECONDS:
+    if not force_refresh and cached and now - cached[0] < _PRICE_DETAIL_CACHE_TTL_SECONDS:
         return cached[1]
 
     try:
         html = _fetch_html(source_url)
     except (URLError, HTTPError, TimeoutError):
         details = {"ungraded": None, "grade_9": None, "psa_10": None}
-        _PRICE_DETAIL_CACHE[source_url] = (now, details)
+        # Do not cache full-miss network failures for long; allow next enrichment retry.
+        if not force_refresh:
+            _PRICE_DETAIL_CACHE[source_url] = (now, details)
         return details
 
     ungraded, grade_9, psa_10 = _sanitize_price_triplet(
@@ -514,7 +516,9 @@ def fetch_card_price_details(source_url: str) -> dict[str, Optional[float]]:
         _parse_psa10_from_card_page(html),
     )
     details = {"ungraded": ungraded, "grade_9": grade_9, "psa_10": psa_10}
-    _PRICE_DETAIL_CACHE[source_url] = (now, details)
+    # Avoid sticky negative cache entries where all fields are missing.
+    if any(value is not None for value in details.values()):
+        _PRICE_DETAIL_CACHE[source_url] = (now, details)
     return details
 
 
@@ -645,7 +649,7 @@ def enrich_catalog_prices(
         if not needs_update:
             continue
         checked += 1
-        details = fetch_card_price_details(card.source_url)
+        details = fetch_card_price_details(card.source_url, force_refresh=refresh_existing)
         ungraded, grade_9, psa_10 = _sanitize_price_triplet(
             details.get("ungraded") if details.get("ungraded") is not None else card.market_price_usd,
             details.get("grade_9") if details.get("grade_9") is not None else card.grade_9_price_usd,
