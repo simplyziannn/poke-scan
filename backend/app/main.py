@@ -4,6 +4,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.catalog import (
+    debug_price_details,
     enrich_catalog_prices,
     get_catalog_meta,
     get_default_set_key,
@@ -74,6 +75,11 @@ def catalog_enrich_prices(
         max_cards=max_cards,
         refresh_existing=refresh_existing,
     )
+
+
+@app.get("/catalog/debug-price")
+def catalog_debug_price(source_url: str) -> dict[str, object]:
+    return debug_price_details(source_url)
 
 
 @app.post("/identify", response_model=IdentifyResponse)

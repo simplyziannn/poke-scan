@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import html as html_lib
 import os
 import re
 import time
@@ -475,6 +476,18 @@ def _extract_label_price_fallback(html: str, label_pattern: str) -> Optional[flo
     return float(match.group(1).replace(",", ""))
 
 
+def _extract_label_numeric_fallback(html: str, label_pattern: str) -> Optional[float]:
+    # Some responses omit '$' symbols but still include decimal prices.
+    pattern = re.compile(
+        rf"{label_pattern}[^\d]{{0,200}}(\d{{1,3}}(?:,\d{{3}})*(?:\.\d{{2}}))",
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(html)
+    if not match:
+        return None
+    return float(match.group(1).replace(",", ""))
+
+
 def _extract_full_guide_pipe_price(html: str, label_pattern: str) -> Optional[float]:
     # Handles text/table mirror layout: "Grade 9  | $352.67" or "PSA 10: $1,350.07"
     pattern = re.compile(
@@ -502,40 +515,54 @@ def _extract_full_price_guide_line_price(html: str, label_pattern: str) -> Optio
 
 
 def _extract_compare_row_prices(html: str) -> dict[str, Optional[float]]:
-    # Parse the common compare-prices layout where labels are one row and values are the next row.
-    # Example labels: Ungraded | Grade 7 | Grade 8 | Grade 9 | Grade 9.5 | PSA 10
-    # Example values: $6.28 | - | - | $17.95 | $20.00 | $60.30
+    # Parse compare-prices layout where labels are a row and values are a following row.
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"\s+", " ", text)
-
-    header = re.search(
-        r"Ungraded\s+Grade\s*7\s+Grade\s*8\s+Grade\s*9(?:\s+Grade\s*9\.?5)?\s+PSA\s*10",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if not header:
+    start_match = re.search(r"Ungraded", text, flags=re.IGNORECASE)
+    if not start_match:
         return {"ungraded": None, "grade_9": None, "psa_10": None}
 
-    tail = text[header.end() : header.end() + 2500]
+    start = start_match.start()
+    header_scope = text[start : start + 900]
+    label_pattern = re.compile(
+        r"Ungraded|Grade\s*7|Grade\s*8|Grade\s*9\.?5|Grade\s*9(?!\s*\.?5)|BGS\s*9\.?5|PSA\s*10",
+        re.IGNORECASE,
+    )
+    labels: list[str] = []
+    last_label_end = 0
+    for match in label_pattern.finditer(header_scope):
+        label = re.sub(r"\s+", " ", match.group(0)).strip().lower()
+        if label not in labels:
+            labels.append(label)
+        last_label_end = match.end()
+        if "psa 10" in label and len(labels) >= 4:
+            break
+
+    if "ungraded" not in labels or "grade 9" not in labels or "psa 10" not in labels:
+        return {"ungraded": None, "grade_9": None, "psa_10": None}
+
+    values_start = start + last_label_end
+    values_scope = text[values_start : values_start + 2600]
     token_pattern = re.compile(
-        r"(?<![+\-])\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)|(?<![+\-])-(?![\d$])"
+        r"(?:^|[\s|>])\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2}))(?=$|[\s|<])|(?:^|[\s|>])-(?=$|[\s|<])"
     )
     tokens: list[Optional[float]] = []
-    for match in token_pattern.finditer(tail):
+    for match in token_pattern.finditer(values_scope):
         if match.group(1):
             tokens.append(float(match.group(1).replace(",", "")))
         else:
             tokens.append(None)
-        if len(tokens) >= 6:
+        if len(tokens) >= len(labels):
             break
 
-    if len(tokens) < 6:
+    if len(tokens) < len(labels):
         return {"ungraded": None, "grade_9": None, "psa_10": None}
 
+    label_to_price = {label: tokens[i] for i, label in enumerate(labels)}
     return {
-        "ungraded": tokens[0],
-        "grade_9": tokens[3],
-        "psa_10": tokens[5],
+        "ungraded": label_to_price.get("ungraded"),
+        "grade_9": label_to_price.get("grade 9"),
+        "psa_10": label_to_price.get("psa 10"),
     }
 
 
@@ -548,6 +575,7 @@ def _parse_ungraded_from_card_page(html: str) -> Optional[float]:
         or _extract_price_from_label_value_cell(html, r"Ungraded")
         or _extract_row_scoped_price(html, r"Ungraded")
         or _extract_label_price_fallback(html, r"Ungraded")
+        or _extract_label_numeric_fallback(html, r"Ungraded")
         or _extract_full_guide_pipe_price(html, r"Ungraded")
     )
 
@@ -561,6 +589,7 @@ def _parse_grade9_from_card_page(html: str) -> Optional[float]:
         or _extract_price_from_label_value_cell(html, r"Grade\s*9(?!\s*\.?5)")
         or _extract_row_scoped_price(html, r"Grade\s*9(?!\s*\.?5)")
         or _extract_label_price_fallback(html, r"Grade\s*9(?!\s*\.?5)")
+        or _extract_label_numeric_fallback(html, r"Grade\s*9(?!\s*\.?5)")
         or _extract_full_guide_pipe_price(html, r"Grade\s*9(?!\s*\.?5)")
     )
 
@@ -574,6 +603,7 @@ def _parse_psa10_from_card_page(html: str) -> Optional[float]:
         or _extract_price_from_label_value_cell(html, r"PSA\s*10")
         or _extract_row_scoped_price(html, r"PSA\s*10")
         or _extract_label_price_fallback(html, r"PSA\s*10")
+        or _extract_label_numeric_fallback(html, r"PSA\s*10")
         or _extract_full_guide_pipe_price(html, r"PSA\s*10")
     )
 
@@ -593,10 +623,11 @@ def fetch_card_price_details(source_url: str, force_refresh: bool = False) -> di
             _PRICE_DETAIL_CACHE[source_url] = (now, details)
         return details
 
+    decoded_html = html_lib.unescape(html)
     ungraded, grade_9, psa_10 = _sanitize_price_triplet(
-        _parse_ungraded_from_card_page(html),
-        _parse_grade9_from_card_page(html),
-        _parse_psa10_from_card_page(html),
+        _parse_ungraded_from_card_page(decoded_html),
+        _parse_grade9_from_card_page(decoded_html),
+        _parse_psa10_from_card_page(decoded_html),
     )
 
     # Direct fetch can return a reduced page that omits graded rows.
@@ -604,10 +635,11 @@ def fetch_card_price_details(source_url: str, force_refresh: bool = False) -> di
     if grade_9 is None and psa_10 is None and "pricecharting.com" in source_url:
         try:
             mirror_html = _fetch_html_mirror(source_url)
+            decoded_mirror_html = html_lib.unescape(mirror_html)
             mirror_ungraded, mirror_grade_9, mirror_psa_10 = _sanitize_price_triplet(
-                _parse_ungraded_from_card_page(mirror_html),
-                _parse_grade9_from_card_page(mirror_html),
-                _parse_psa10_from_card_page(mirror_html),
+                _parse_ungraded_from_card_page(decoded_mirror_html),
+                _parse_grade9_from_card_page(decoded_mirror_html),
+                _parse_psa10_from_card_page(decoded_mirror_html),
             )
             if mirror_ungraded is not None:
                 ungraded = mirror_ungraded
@@ -787,6 +819,38 @@ def enrich_catalog_prices(
         meta_state["last_error_detail"] = None
 
     return {"set_key": config.key, "checked": checked, "updated": updated}
+
+
+def debug_price_details(source_url: str) -> dict[str, object]:
+    debug: dict[str, object] = {"source_url": source_url}
+
+    try:
+        direct_html = _fetch_html(source_url)
+        direct_decoded = html_lib.unescape(direct_html)
+        debug["direct"] = {
+            "compare_row": _extract_compare_row_prices(direct_decoded),
+            "ungraded": _parse_ungraded_from_card_page(direct_decoded),
+            "grade_9": _parse_grade9_from_card_page(direct_decoded),
+            "psa_10": _parse_psa10_from_card_page(direct_decoded),
+            "html_len": len(direct_decoded),
+        }
+    except (URLError, HTTPError, TimeoutError) as exc:
+        debug["direct_error"] = str(exc)
+
+    try:
+        mirror_html = _fetch_html_mirror(source_url)
+        mirror_decoded = html_lib.unescape(mirror_html)
+        debug["mirror"] = {
+            "compare_row": _extract_compare_row_prices(mirror_decoded),
+            "ungraded": _parse_ungraded_from_card_page(mirror_decoded),
+            "grade_9": _parse_grade9_from_card_page(mirror_decoded),
+            "psa_10": _parse_psa10_from_card_page(mirror_decoded),
+            "html_len": len(mirror_decoded),
+        }
+    except (URLError, HTTPError, TimeoutError) as exc:
+        debug["mirror_error"] = str(exc)
+
+    return debug
 
 
 # Backward-compatible wrappers for existing imports.
