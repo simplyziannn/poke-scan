@@ -459,18 +459,40 @@ def _extract_row_scoped_price(html: str, label_pattern: str) -> Optional[float]:
     return float(match.group(1).replace(",", ""))
 
 
+def _extract_label_price_fallback(html: str, label_pattern: str) -> Optional[float]:
+    # Fallback parser for plain-text mirror responses and HTML layouts where table structure differs.
+    pattern = re.compile(
+        rf"{label_pattern}[^\$]{{0,1400}}?\$(\d{{1,3}}(?:,\d{{3}})*(?:\.\d{{2}})?)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(html)
+    if not match:
+        return None
+    return float(match.group(1).replace(",", ""))
+
+
 def _parse_ungraded_from_card_page(html: str) -> Optional[float]:
-    return _extract_price_from_label_value_cell(html, r"Ungraded") or _extract_row_scoped_price(html, r"Ungraded")
+    return (
+        _extract_price_from_label_value_cell(html, r"Ungraded")
+        or _extract_row_scoped_price(html, r"Ungraded")
+        or _extract_label_price_fallback(html, r"Ungraded")
+    )
 
 
 def _parse_grade9_from_card_page(html: str) -> Optional[float]:
-    return _extract_price_from_label_value_cell(html, r"Grade\s*9(?!\.)") or _extract_row_scoped_price(
-        html, r"Grade\s*9(?!\.)"
+    return (
+        _extract_price_from_label_value_cell(html, r"Grade\s*9(?!\s*\.?5)")
+        or _extract_row_scoped_price(html, r"Grade\s*9(?!\s*\.?5)")
+        or _extract_label_price_fallback(html, r"Grade\s*9(?!\s*\.?5)")
     )
 
 
 def _parse_psa10_from_card_page(html: str) -> Optional[float]:
-    return _extract_price_from_label_value_cell(html, r"PSA\s*10") or _extract_row_scoped_price(html, r"PSA\s*10")
+    return (
+        _extract_price_from_label_value_cell(html, r"PSA\s*10")
+        or _extract_row_scoped_price(html, r"PSA\s*10")
+        or _extract_label_price_fallback(html, r"PSA\s*10")
+    )
 
 
 def fetch_card_price_details(source_url: str) -> dict[str, Optional[float]]:
@@ -599,6 +621,65 @@ def rebuild_catalog_from_number_search(
         meta_state["last_error_detail"] = None
         meta_state["last_sync_source"] = "number_search_rebuild"
     return cards
+
+
+def enrich_catalog_prices(
+    set_key: Optional[str] = None,
+    max_cards: Optional[int] = None,
+    refresh_existing: bool = False,
+) -> dict[str, int | str]:
+    config = get_set_config(set_key)
+    cache_state, meta_state = _state_for(config)
+    cards = load_catalog(set_key=config.key, force_refresh=False)
+    if not cards:
+        return {"set_key": config.key, "checked": 0, "updated": 0}
+
+    updated = 0
+    checked = 0
+    mutable = list(cards)
+
+    for index, card in enumerate(mutable):
+        if max_cards is not None and checked >= max_cards:
+            break
+        needs_update = refresh_existing or card.grade_9_price_usd is None or card.psa_10_price_usd is None
+        if not needs_update:
+            continue
+        checked += 1
+        details = fetch_card_price_details(card.source_url)
+        ungraded, grade_9, psa_10 = _sanitize_price_triplet(
+            details.get("ungraded") if details.get("ungraded") is not None else card.market_price_usd,
+            details.get("grade_9") if details.get("grade_9") is not None else card.grade_9_price_usd,
+            details.get("psa_10") if details.get("psa_10") is not None else card.psa_10_price_usd,
+        )
+        if (
+            ungraded == card.market_price_usd
+            and grade_9 == card.grade_9_price_usd
+            and psa_10 == card.psa_10_price_usd
+        ):
+            continue
+        mutable[index] = CatalogCard(
+            card_id=card.card_id,
+            name=card.name,
+            set_name=card.set_name,
+            number_index=card.number_index,
+            number=card.number,
+            market_price_usd=ungraded,
+            grade_9_price_usd=grade_9,
+            psa_10_price_usd=psa_10,
+            source_url=card.source_url,
+        )
+        updated += 1
+
+    if updated > 0:
+        now = time.time()
+        cache_state["fetched_at"] = now
+        cache_state["cards"] = mutable
+        _persist_cards(config, mutable)
+        meta_state["last_sync_source"] = "price_enrichment"
+        meta_state["last_error"] = None
+        meta_state["last_error_detail"] = None
+
+    return {"set_key": config.key, "checked": checked, "updated": updated}
 
 
 # Backward-compatible wrappers for existing imports.

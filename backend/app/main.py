@@ -3,7 +3,13 @@ import os
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.catalog import get_catalog_meta, get_default_set_key, load_catalog, rebuild_catalog_from_number_search
+from app.catalog import (
+    enrich_catalog_prices,
+    get_catalog_meta,
+    get_default_set_key,
+    load_catalog,
+    rebuild_catalog_from_number_search,
+)
 from app.match import match_cards
 from app.models import IdentifyResponse
 from app.ocr import run_ocr
@@ -54,6 +60,20 @@ def catalog_rebuild(set_key: str | None = None) -> dict[str, int | str]:
     selected_set_key = set_key or active_set_key
     cards = rebuild_catalog_from_number_search(set_key=selected_set_key)
     return {"set_key": selected_set_key, "cards_loaded": len(cards)}
+
+
+@app.post("/catalog/enrich-prices")
+def catalog_enrich_prices(
+    set_key: str | None = None,
+    max_cards: int | None = None,
+    refresh_existing: bool = False,
+) -> dict[str, int | str]:
+    selected_set_key = set_key or active_set_key
+    return enrich_catalog_prices(
+        set_key=selected_set_key,
+        max_cards=max_cards,
+        refresh_existing=refresh_existing,
+    )
 
 
 @app.post("/identify", response_model=IdentifyResponse)
