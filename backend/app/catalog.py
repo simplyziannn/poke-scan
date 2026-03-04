@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -9,30 +10,35 @@ from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-SET_URL = "https://www.pricecharting.com/console/pokemon-japanese-nihil-zero"
 _CACHE_TTL_SECONDS = 60 * 60 * 6
-_CACHE: dict[str, object] = {"fetched_at": 0.0, "cards": []}
-_PERSIST_PATH = Path(__file__).resolve().parent / "data" / "nihil_zero_cache.json"
-_META: dict[str, object] = {
-    "last_error": None,
-    "last_error_detail": None,
-    "last_sync_source": None,
-    "pages_fetched": 0,
-}
-SET_MAX_INDEX = 120
 _PRICE_DETAIL_CACHE_TTL_SECONDS = 60 * 30
-_PRICE_DETAIL_CACHE: dict[str, tuple[float, dict[str, Optional[float]]]] = {}
+_DATA_DIR = Path(__file__).resolve().parent / "data"
 
-_CARD_ANCHOR_PATTERN = re.compile(
-    r'href="(?P<href>/game/pokemon-japanese-nihil-zero/[^"]+)">\s*(?P<name>[^<]+?)\s*</a>',
-    re.IGNORECASE,
-)
-_NUM_IN_NAME_PATTERN = re.compile(r"#\s*(\d{1,3})")
-_NUM_IN_HREF_PATTERN = re.compile(r"-(\d{1,3})(?:$|[/?#])")
-_PRICE_PATTERN = re.compile(r"\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)")
-_UNGD_PATTERN = re.compile(r"Ungraded[^$]{0,120}\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)", re.IGNORECASE | re.DOTALL)
-_GRADE9_PATTERN = re.compile(r"Grade\s*9[^$]{0,140}\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)", re.IGNORECASE | re.DOTALL)
-_PSA10_PATTERN = re.compile(r"PSA\s*10[^$]{0,140}\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)", re.IGNORECASE | re.DOTALL)
+
+@dataclass(frozen=True)
+class SetConfig:
+    key: str
+    set_name: str
+    set_url: str
+    slug_path: str
+    cache_filename: str
+    set_max_index: int
+    collector_denominator: Optional[str]
+    search_query_base: str
+
+
+SET_CONFIGS: dict[str, SetConfig] = {
+    "nihil-zero": SetConfig(
+        key="nihil-zero",
+        set_name="Pokemon Japanese Nihil Zero",
+        set_url="https://www.pricecharting.com/console/pokemon-japanese-nihil-zero",
+        slug_path="pokemon-japanese-nihil-zero",
+        cache_filename="nihil_zero_cache.json",
+        set_max_index=120,
+        collector_denominator="080",
+        search_query_base="pokemon japanese nihil zero",
+    )
+}
 
 
 @dataclass
@@ -48,6 +54,53 @@ class CatalogCard:
     source_url: str
 
 
+_CATALOG_CACHE: dict[str, dict[str, object]] = {}
+_CATALOG_META: dict[str, dict[str, object]] = {}
+_PRICE_DETAIL_CACHE: dict[str, tuple[float, dict[str, Optional[float]]]] = {}
+
+_NUM_IN_NAME_PATTERN = re.compile(r"#\s*(\d{1,3})")
+_NUM_IN_HREF_PATTERN = re.compile(r"-(\d{1,3})(?:$|[/?#])")
+_PRICE_PATTERN = re.compile(r"\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)")
+
+
+def list_supported_sets() -> list[str]:
+    return sorted(SET_CONFIGS.keys())
+
+
+def get_default_set_key() -> str:
+    configured = (os.getenv("POKE_SCAN_SET_KEY") or "nihil-zero").strip().lower()
+    if configured in SET_CONFIGS:
+        return configured
+    return "nihil-zero"
+
+
+def get_set_config(set_key: Optional[str] = None) -> SetConfig:
+    key = (set_key or get_default_set_key()).strip().lower()
+    config = SET_CONFIGS.get(key)
+    if config:
+        return config
+    return SET_CONFIGS[get_default_set_key()]
+
+
+def _cache_path(config: SetConfig) -> Path:
+    return _DATA_DIR / config.cache_filename
+
+
+def _state_for(config: SetConfig) -> tuple[dict[str, object], dict[str, object]]:
+    cache_state = _CATALOG_CACHE.setdefault(config.key, {"fetched_at": 0.0, "cards": []})
+    meta_state = _CATALOG_META.setdefault(
+        config.key,
+        {
+            "last_error": None,
+            "last_error_detail": None,
+            "last_sync_source": None,
+            "pages_fetched": 0,
+            "set_key": config.key,
+        },
+    )
+    return cache_state, meta_state
+
+
 def _parse_price(text: str) -> Optional[float]:
     match = _PRICE_PATTERN.search(text)
     if not match:
@@ -55,9 +108,24 @@ def _parse_price(text: str) -> Optional[float]:
     return float(match.group(1).replace(",", ""))
 
 
-def _card_id_from_href(href: str) -> str:
+def _sanitize_price_triplet(
+    ungraded: Optional[float], grade_9: Optional[float], psa_10: Optional[float]
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    # Guard against parser drift where PSA10 gets parsed as Ungraded value.
+    if (
+        psa_10 is not None
+        and ungraded is not None
+        and abs(psa_10 - ungraded) < 0.001
+        and grade_9 is not None
+        and grade_9 > ungraded * 1.15
+    ):
+        psa_10 = None
+    return ungraded, grade_9, psa_10
+
+
+def _card_id_from_href(config: SetConfig, href: str) -> str:
     slug = href.rsplit("/", 1)[-1]
-    return f"nihil-zero-{slug}"
+    return f"{config.key}-{slug}"
 
 
 def _fetch_html(url: str) -> str:
@@ -99,10 +167,24 @@ def _parse_number_index(name: str, href: str) -> Optional[str]:
     return None
 
 
-def _parse_cards(html: str) -> list[CatalogCard]:
+def _card_anchor_pattern(config: SetConfig) -> re.Pattern[str]:
+    return re.compile(
+        rf'href="(?P<href>/game/{re.escape(config.slug_path)}/[^"]+)">\s*(?P<name>[^<]+?)\s*</a>',
+        re.IGNORECASE,
+    )
+
+
+def _mirror_card_pattern(config: SetConfig) -> re.Pattern[str]:
+    return re.compile(
+        rf"\[(?P<name>[^\]]+?)\s*#(?P<number>\d{{1,3}})\]\((?P<url>https://www\\.pricecharting\\.com/game/{re.escape(config.slug_path)}/[^\)]+)\)",
+        re.IGNORECASE,
+    )
+
+
+def _parse_cards(html: str, config: SetConfig) -> list[CatalogCard]:
     cards: list[CatalogCard] = []
 
-    for match in _CARD_ANCHOR_PATTERN.finditer(html):
+    for match in _card_anchor_pattern(config).finditer(html):
         href = match.group("href")
         label = re.sub(r"\s+", " ", match.group("name")).strip()
 
@@ -118,9 +200,9 @@ def _parse_cards(html: str) -> list[CatalogCard]:
 
         cards.append(
             CatalogCard(
-                card_id=_card_id_from_href(href),
+                card_id=_card_id_from_href(config, href),
                 name=clean_name or label,
-                set_name="Pokemon Japanese Nihil Zero",
+                set_name=config.set_name,
                 number_index=number_index,
                 number=number_index,
                 market_price_usd=price,
@@ -130,11 +212,7 @@ def _parse_cards(html: str) -> list[CatalogCard]:
             )
         )
 
-    mirror_pattern = re.compile(
-        r"\[(?P<name>[^\]]+?)\s*#(?P<number>\d{1,3})\]\((?P<url>https://www\.pricecharting\.com/game/pokemon-japanese-nihil-zero/[^\)]+)\)",
-        re.IGNORECASE,
-    )
-    for match in mirror_pattern.finditer(html):
+    for match in _mirror_card_pattern(config).finditer(html):
         label = re.sub(r"\s+", " ", match.group("name")).strip()
         number_index = str(int(match.group("number")))
         full_url = match.group("url")
@@ -144,9 +222,9 @@ def _parse_cards(html: str) -> list[CatalogCard]:
 
         cards.append(
             CatalogCard(
-                card_id=_card_id_from_href(href),
+                card_id=_card_id_from_href(config, href),
                 name=label,
-                set_name="Pokemon Japanese Nihil Zero",
+                set_name=config.set_name,
                 number_index=number_index,
                 number=number_index,
                 market_price_usd=price,
@@ -169,15 +247,14 @@ def _parse_cards(html: str) -> list[CatalogCard]:
     return list(unique.values())
 
 
-def _fetch_set_pages() -> tuple[list[CatalogCard], int]:
+def _fetch_set_pages(config: SetConfig) -> tuple[list[CatalogCard], int]:
     all_cards: dict[str, CatalogCard] = {}
     pages_fetched = 0
 
-    # PriceCharting may paginate set listing. Try a bounded number of pages.
     for page in range(1, 8):
-        url = SET_URL if page == 1 else f"{SET_URL}?page={page}"
+        url = config.set_url if page == 1 else f"{config.set_url}?page={page}"
         html = _fetch_html(url)
-        page_cards = _parse_cards(html)
+        page_cards = _parse_cards(html, config)
         pages_fetched += 1
 
         if not page_cards and page > 2:
@@ -197,8 +274,9 @@ def _fetch_set_pages() -> tuple[list[CatalogCard], int]:
     return list(all_cards.values()), pages_fetched
 
 
-def _persist_cards(cards: list[CatalogCard]) -> None:
-    _PERSIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _persist_cards(config: SetConfig, cards: list[CatalogCard]) -> None:
+    path = _cache_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = [
         {
             "card_id": card.card_id,
@@ -213,30 +291,36 @@ def _persist_cards(cards: list[CatalogCard]) -> None:
         }
         for card in cards
     ]
-    _PERSIST_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _load_persisted_cards() -> list[CatalogCard]:
-    if not _PERSIST_PATH.exists():
+def _load_persisted_cards(config: SetConfig) -> list[CatalogCard]:
+    path = _cache_path(config)
+    if not path.exists():
         return []
 
     try:
-        payload = json.loads(_PERSIST_PATH.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return []
 
     cards: list[CatalogCard] = []
     for item in payload:
+        ungraded, grade_9, psa_10 = _sanitize_price_triplet(
+            item.get("market_price_usd"),
+            item.get("grade_9_price_usd"),
+            item.get("psa_10_price_usd"),
+        )
         cards.append(
             CatalogCard(
                 card_id=str(item.get("card_id", "")),
                 name=str(item.get("name", "")),
-                set_name=str(item.get("set_name", "Pokemon Japanese Nihil Zero")),
+                set_name=str(item.get("set_name", config.set_name)),
                 number_index=str(item.get("number_index", "")),
                 number=item.get("number"),
-                market_price_usd=item.get("market_price_usd"),
-                grade_9_price_usd=item.get("grade_9_price_usd"),
-                psa_10_price_usd=item.get("psa_10_price_usd"),
+                market_price_usd=ungraded,
+                grade_9_price_usd=grade_9,
+                psa_10_price_usd=psa_10,
                 source_url=str(item.get("source_url", "")),
             )
         )
@@ -260,57 +344,62 @@ def _merge_cards(primary: list[CatalogCard], secondary: list[CatalogCard]) -> li
     return list(merged.values())
 
 
-def load_nihil_zero_catalog(force_refresh: bool = False) -> list[CatalogCard]:
+def load_catalog(set_key: Optional[str] = None, force_refresh: bool = False) -> list[CatalogCard]:
+    config = get_set_config(set_key)
+    cache_state, meta_state = _state_for(config)
+
     now = time.time()
-    cached_at = float(_CACHE["fetched_at"])
-    cached_cards = _CACHE["cards"]
+    cached_at = float(cache_state["fetched_at"])
+    cached_cards = cache_state["cards"]
 
     if not force_refresh and cached_cards and now - cached_at < _CACHE_TTL_SECONDS:
         return list(cached_cards)  # type: ignore[return-value]
 
     try:
-        parsed_cards, pages_fetched = _fetch_set_pages()
+        parsed_cards, pages_fetched = _fetch_set_pages(config)
         if parsed_cards:
-            persisted_cards = _load_persisted_cards()
+            persisted_cards = _load_persisted_cards(config)
             merged_cards = _merge_cards(parsed_cards, persisted_cards)
-            _CACHE["fetched_at"] = now
-            _CACHE["cards"] = merged_cards
-            _persist_cards(merged_cards)
-            _META["last_error"] = None
-            _META["last_error_detail"] = None
-            _META["last_sync_source"] = "live_set_page"
-            _META["pages_fetched"] = pages_fetched
+            cache_state["fetched_at"] = now
+            cache_state["cards"] = merged_cards
+            _persist_cards(config, merged_cards)
+            meta_state["last_error"] = None
+            meta_state["last_error_detail"] = None
+            meta_state["last_sync_source"] = "live_set_page"
+            meta_state["pages_fetched"] = pages_fetched
             return merged_cards
     except (URLError, HTTPError, TimeoutError) as exc:
-        _META["last_error"] = "network_error_set_page"
-        _META["last_error_detail"] = str(exc)
+        meta_state["last_error"] = "network_error_set_page"
+        meta_state["last_error_detail"] = str(exc)
 
-    persisted = _load_persisted_cards()
+    persisted = _load_persisted_cards(config)
     if persisted:
-        _CACHE["fetched_at"] = now
-        _CACHE["cards"] = persisted
-        _META["last_sync_source"] = "local_cache_file"
+        cache_state["fetched_at"] = now
+        cache_state["cards"] = persisted
+        meta_state["last_sync_source"] = "local_cache_file"
         return persisted
 
     return list(cached_cards) if cached_cards else []  # type: ignore[return-value]
 
 
-def get_catalog_meta() -> dict[str, object]:
+def get_catalog_meta(set_key: Optional[str] = None) -> dict[str, object]:
+    config = get_set_config(set_key)
+    cache_state, meta_state = _state_for(config)
     return {
-        "cards_loaded": len(_CACHE.get("cards", [])),
-        "fetched_at": _CACHE.get("fetched_at"),
-        "last_error": _META.get("last_error"),
-        "last_error_detail": _META.get("last_error_detail"),
-        "last_sync_source": _META.get("last_sync_source"),
-        "pages_fetched": _META.get("pages_fetched"),
-        "cache_file": str(_PERSIST_PATH),
+        "set_key": config.key,
+        "cards_loaded": len(cache_state.get("cards", [])),
+        "fetched_at": cache_state.get("fetched_at"),
+        "last_error": meta_state.get("last_error"),
+        "last_error_detail": meta_state.get("last_error_detail"),
+        "last_sync_source": meta_state.get("last_sync_source"),
+        "pages_fetched": meta_state.get("pages_fetched"),
+        "cache_file": str(_cache_path(config)),
     }
 
 
-def _parse_card_link_from_search(html: str, number_index: str) -> Optional[tuple[str, str]]:
-    # Preferred match: explicit "#<number>" in anchor text.
+def _parse_card_link_from_search(html: str, number_index: str, config: SetConfig) -> Optional[tuple[str, str]]:
     pattern = re.compile(
-        rf'href="(?P<href>/game/pokemon-japanese-nihil-zero/[^"]+)">(?P<name>[^<]*?)\s*#0*{re.escape(number_index)}\s*</a>',
+        rf'href="(?P<href>/game/{re.escape(config.slug_path)}/[^"]+)">(?P<name>[^<]*?)\s*#0*{re.escape(number_index)}\s*</a>',
         re.IGNORECASE,
     )
     match = pattern.search(html)
@@ -319,9 +408,8 @@ def _parse_card_link_from_search(html: str, number_index: str) -> Optional[tuple
         name = re.sub(r"\s+", " ", match.group("name")).strip()
         return href, name
 
-    # Fallback: any Nihil Zero card link whose slug/name infers the same number.
     generic = re.compile(
-        r'href="(?P<href>/game/pokemon-japanese-nihil-zero/[^"]+)">(?P<name>[^<]*?)</a>',
+        rf'href="(?P<href>/game/{re.escape(config.slug_path)}/[^"]+)">(?P<name>[^<]*?)</a>',
         re.IGNORECASE,
     )
     target_number = str(int(number_index))
@@ -335,25 +423,44 @@ def _parse_card_link_from_search(html: str, number_index: str) -> Optional[tuple
     return None
 
 
-def _parse_ungraded_from_card_page(html: str) -> Optional[float]:
-    match = _UNGD_PATTERN.search(html)
+def _extract_price_from_label_value_cell(html: str, label_pattern: str) -> Optional[float]:
+    pattern = re.compile(
+        rf"{label_pattern}(?:(?!</tr>).){{0,400}}?<(?P<tag>td|div|span)[^>]*>\s*(?P<value>[^<]{{1,40}})\s*</(?P=tag)>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in pattern.finditer(html):
+        value = re.sub(r"\s+", " ", match.group("value")).strip()
+        if value in {"-", "--", "N/A", "n/a", "none", "None"}:
+            return None
+        price = _parse_price(value)
+        if price is not None:
+            return price
+    return None
+
+
+def _extract_row_scoped_price(html: str, label_pattern: str) -> Optional[float]:
+    pattern = re.compile(
+        rf"{label_pattern}(?:(?!</tr>).){{0,500}}?\$(\d{{1,3}}(?:,\d{{3}})*(?:\.\d{{2}})?)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(html)
     if not match:
         return None
     return float(match.group(1).replace(",", ""))
+
+
+def _parse_ungraded_from_card_page(html: str) -> Optional[float]:
+    return _extract_price_from_label_value_cell(html, r"Ungraded") or _extract_row_scoped_price(html, r"Ungraded")
 
 
 def _parse_grade9_from_card_page(html: str) -> Optional[float]:
-    match = _GRADE9_PATTERN.search(html)
-    if not match:
-        return None
-    return float(match.group(1).replace(",", ""))
+    return _extract_price_from_label_value_cell(html, r"Grade\s*9(?!\.)") or _extract_row_scoped_price(
+        html, r"Grade\s*9(?!\.)"
+    )
 
 
 def _parse_psa10_from_card_page(html: str) -> Optional[float]:
-    match = _PSA10_PATTERN.search(html)
-    if not match:
-        return None
-    return float(match.group(1).replace(",", ""))
+    return _extract_price_from_label_value_cell(html, r"PSA\s*10") or _extract_row_scoped_price(html, r"PSA\s*10")
 
 
 def fetch_card_price_details(source_url: str) -> dict[str, Optional[float]]:
@@ -369,23 +476,27 @@ def fetch_card_price_details(source_url: str) -> dict[str, Optional[float]]:
         _PRICE_DETAIL_CACHE[source_url] = (now, details)
         return details
 
-    details = {
-        "ungraded": _parse_ungraded_from_card_page(html),
-        "grade_9": _parse_grade9_from_card_page(html),
-        "psa_10": _parse_psa10_from_card_page(html),
-    }
+    ungraded, grade_9, psa_10 = _sanitize_price_triplet(
+        _parse_ungraded_from_card_page(html),
+        _parse_grade9_from_card_page(html),
+        _parse_psa10_from_card_page(html),
+    )
+    details = {"ungraded": ungraded, "grade_9": grade_9, "psa_10": psa_10}
     _PRICE_DETAIL_CACHE[source_url] = (now, details)
     return details
 
 
-def find_card_by_number_online(number_index: str) -> Optional[CatalogCard]:
+def find_card_by_number_online(number_index: str, set_key: Optional[str] = None) -> Optional[CatalogCard]:
+    config = get_set_config(set_key)
+    _cache_state, meta_state = _state_for(config)
+
     number_plain = str(int(number_index))
     number_padded = number_plain.zfill(3)
     queries = [
-        f"pokemon japanese nihil zero #{number_plain}",
-        f"pokemon japanese nihil zero #{number_padded}",
-        f"pokemon japanese nihil zero {number_plain}",
-        f"pokemon japanese nihil zero {number_padded}",
+        f"{config.search_query_base} #{number_plain}",
+        f"{config.search_query_base} #{number_padded}",
+        f"{config.search_query_base} {number_plain}",
+        f"{config.search_query_base} {number_padded}",
     ]
 
     card_link: Optional[tuple[str, str]] = None
@@ -397,18 +508,18 @@ def find_card_by_number_online(number_index: str) -> Optional[CatalogCard]:
         except (URLError, HTTPError, TimeoutError) as exc:
             last_exc = exc
             continue
-        card_link = _parse_card_link_from_search(search_html, number_plain)
+        card_link = _parse_card_link_from_search(search_html, number_plain, config)
         if card_link:
             break
 
     if not card_link and last_exc:
-        _META["last_error"] = "network_error_search_page"
-        _META["last_error_detail"] = str(last_exc)
+        meta_state["last_error"] = "network_error_search_page"
+        meta_state["last_error_detail"] = str(last_exc)
         return None
 
     if not card_link:
-        _META["last_error"] = "search_no_matching_card_link"
-        _META["last_error_detail"] = f"number_index={number_plain}"
+        meta_state["last_error"] = "search_no_matching_card_link"
+        meta_state["last_error_detail"] = f"number_index={number_plain}"
         return None
 
     href, name = card_link
@@ -417,24 +528,25 @@ def find_card_by_number_online(number_index: str) -> Optional[CatalogCard]:
     try:
         card_html = _fetch_html(full_url)
     except (URLError, HTTPError, TimeoutError) as exc:
-        _META["last_error"] = "network_error_card_page"
-        _META["last_error_detail"] = str(exc)
+        meta_state["last_error"] = "network_error_card_page"
+        meta_state["last_error_detail"] = str(exc)
         return None
 
     ungraded = _parse_ungraded_from_card_page(card_html)
     grade_9 = _parse_grade9_from_card_page(card_html)
     psa_10 = _parse_psa10_from_card_page(card_html)
+    ungraded, grade_9, psa_10 = _sanitize_price_triplet(ungraded, grade_9, psa_10)
     _PRICE_DETAIL_CACHE[full_url] = (
         time.time(),
         {"ungraded": ungraded, "grade_9": grade_9, "psa_10": psa_10},
     )
-    _META["last_error"] = None
-    _META["last_error_detail"] = None
-    _META["last_sync_source"] = "online_number_fallback"
+    meta_state["last_error"] = None
+    meta_state["last_error_detail"] = None
+    meta_state["last_sync_source"] = "online_number_fallback"
     return CatalogCard(
-        card_id=_card_id_from_href(href),
+        card_id=_card_id_from_href(config, href),
         name=name,
-        set_name="Pokemon Japanese Nihil Zero",
+        set_name=config.set_name,
         number_index=number_plain,
         number=number_plain,
         market_price_usd=ungraded,
@@ -444,12 +556,20 @@ def find_card_by_number_online(number_index: str) -> Optional[CatalogCard]:
     )
 
 
-def rebuild_catalog_from_number_search(start: int = 1, end: int = SET_MAX_INDEX) -> list[CatalogCard]:
-    existing = {card.card_id: card for card in load_nihil_zero_catalog(force_refresh=True)}
+def rebuild_catalog_from_number_search(
+    start: int = 1,
+    end: Optional[int] = None,
+    set_key: Optional[str] = None,
+) -> list[CatalogCard]:
+    config = get_set_config(set_key)
+    cache_state, meta_state = _state_for(config)
+    upper = end if end is not None else config.set_max_index
+
+    existing = {card.card_id: card for card in load_catalog(set_key=config.key, force_refresh=True)}
     rebuilt: dict[str, CatalogCard] = dict(existing)
 
-    for number in range(start, end + 1):
-        online = find_card_by_number_online(str(number))
+    for number in range(start, upper + 1):
+        online = find_card_by_number_online(str(number), set_key=config.key)
         if not online:
             continue
         current = rebuilt.get(online.card_id)
@@ -462,10 +582,15 @@ def rebuild_catalog_from_number_search(start: int = 1, end: int = SET_MAX_INDEX)
     cards = list(rebuilt.values())
     if cards:
         now = time.time()
-        _CACHE["fetched_at"] = now
-        _CACHE["cards"] = cards
-        _persist_cards(cards)
-        _META["last_error"] = None
-        _META["last_error_detail"] = None
-        _META["last_sync_source"] = "number_search_rebuild"
+        cache_state["fetched_at"] = now
+        cache_state["cards"] = cards
+        _persist_cards(config, cards)
+        meta_state["last_error"] = None
+        meta_state["last_error_detail"] = None
+        meta_state["last_sync_source"] = "number_search_rebuild"
     return cards
+
+
+# Backward-compatible wrappers for existing imports.
+def load_nihil_zero_catalog(force_refresh: bool = False) -> list[CatalogCard]:
+    return load_catalog(set_key="nihil-zero", force_refresh=force_refresh)

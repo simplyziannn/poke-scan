@@ -3,12 +3,13 @@ import os
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.catalog import get_catalog_meta, load_nihil_zero_catalog, rebuild_catalog_from_number_search
+from app.catalog import get_catalog_meta, get_default_set_key, load_catalog, rebuild_catalog_from_number_search
 from app.match import match_cards
 from app.models import IdentifyResponse
 from app.ocr import run_ocr
 
 app = FastAPI(title="Poke Scan API")
+active_set_key = get_default_set_key()
 
 default_origins = [
     "http://localhost:3000",
@@ -34,10 +35,12 @@ def health() -> dict[str, bool]:
 
 
 @app.get("/catalog/status")
-def catalog_status() -> dict[str, str | int]:
-    cards = load_nihil_zero_catalog()
-    meta = get_catalog_meta()
+def catalog_status(set_key: str | None = None) -> dict[str, str | int]:
+    selected_set_key = set_key or active_set_key
+    cards = load_catalog(set_key=selected_set_key)
+    meta = get_catalog_meta(set_key=selected_set_key)
     return {
+        "set_key": str(meta.get("set_key") or selected_set_key),
         "cards_loaded": len(cards),
         "last_error": str(meta.get("last_error") or ""),
         "last_error_detail": str(meta.get("last_error_detail") or ""),
@@ -47,9 +50,10 @@ def catalog_status() -> dict[str, str | int]:
 
 
 @app.post("/catalog/rebuild")
-def catalog_rebuild() -> dict[str, int]:
-    cards = rebuild_catalog_from_number_search()
-    return {"cards_loaded": len(cards)}
+def catalog_rebuild(set_key: str | None = None) -> dict[str, int | str]:
+    selected_set_key = set_key or active_set_key
+    cards = rebuild_catalog_from_number_search(set_key=selected_set_key)
+    return {"set_key": selected_set_key, "cards_loaded": len(cards)}
 
 
 @app.post("/identify", response_model=IdentifyResponse)
@@ -66,6 +70,7 @@ async def identify(image: UploadFile = File(...)) -> IdentifyResponse:
         ocr_result.extracted_number,
         ocr_result.extracted_name,
         filename_hint=image.filename,
+        set_key=active_set_key,
     )
 
     return IdentifyResponse(

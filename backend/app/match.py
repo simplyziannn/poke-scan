@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Optional
 
 from rapidfuzz import fuzz
 
-from app.catalog import fetch_card_price_details, find_card_by_number_online, load_nihil_zero_catalog
+from app.catalog import (
+    fetch_card_price_details,
+    find_card_by_number_online,
+    get_default_set_key,
+    get_set_config,
+    load_catalog,
+)
 from app.models import Candidate
-
-SET_DENOMINATOR = "080"
 
 
 def _collector_index(extracted_number: Optional[str]) -> Optional[str]:
@@ -67,6 +72,7 @@ def _number_score(
     extracted_indexes: list[str],
     extracted_denominator: Optional[str],
     catalog_index: str,
+    target_denominator: Optional[str],
 ) -> float:
     if not extracted_number or not extracted_indexes:
         return 0.0
@@ -76,11 +82,11 @@ def _number_score(
         primary_index = extracted_indexes[0]
         if primary_index == normalized_catalog:
             # Strong signal even if denominator OCR is noisy.
-            if extracted_denominator == SET_DENOMINATOR:
+            if target_denominator and extracted_denominator == target_denominator:
                 return 0.78
             return 0.62
         # Recovered from noisy leading digits; still a strong signal.
-        if extracted_denominator == SET_DENOMINATOR:
+        if target_denominator and extracted_denominator == target_denominator:
             return 0.70
         return 0.55
 
@@ -113,8 +119,11 @@ def match_cards(
     extracted_number: Optional[str],
     extracted_name: Optional[str],
     filename_hint: Optional[str] = None,
+    set_key: Optional[str] = None,
 ) -> list[Candidate]:
-    cards = load_nihil_zero_catalog()
+    selected_set_key = (set_key or os.getenv("POKE_SCAN_SET_KEY") or get_default_set_key()).strip().lower()
+    set_config = get_set_config(selected_set_key)
+    cards = load_catalog(set_key=set_config.key)
 
     extracted_index = _collector_index(extracted_number)
     extracted_indexes = _collector_index_candidates(extracted_number)
@@ -122,7 +131,7 @@ def match_cards(
     fallback_name = _normalize_filename_hint(filename_hint)
     effective_name = fallback_name if _is_low_quality_name(extracted_name) else extracted_name
     if not cards and extracted_index:
-        fallback = find_card_by_number_online(extracted_index)
+        fallback = find_card_by_number_online(extracted_index, set_key=set_config.key)
         if fallback:
             cards = [fallback]
 
@@ -132,7 +141,13 @@ def match_cards(
     candidates: list[Candidate] = []
 
     for card in cards:
-        confidence = _number_score(extracted_number, extracted_indexes, extracted_denominator, card.number_index)
+        confidence = _number_score(
+            extracted_number,
+            extracted_indexes,
+            extracted_denominator,
+            card.number_index,
+            set_config.collector_denominator,
+        )
         confidence += _name_score(effective_name, card.name)
 
         if confidence < 0.09:
@@ -160,7 +175,7 @@ def match_cards(
     if extracted_index:
         needs_online_lookup = not ranked or ranked[0].confidence < 0.74
         if needs_online_lookup:
-            fallback = find_card_by_number_online(extracted_index)
+            fallback = find_card_by_number_online(extracted_index, set_key=set_config.key)
             if fallback:
                 fallback_confidence = 0.90
                 if effective_name:
