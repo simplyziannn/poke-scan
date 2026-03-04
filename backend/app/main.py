@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,14 +10,18 @@ from app.ocr import run_ocr
 
 app = FastAPI(title="Poke Scan API")
 
+default_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://192.168.1.11:3000",
+]
+cors_env = os.getenv("CORS_ALLOW_ORIGINS", "")
+allow_origins = [origin.strip() for origin in cors_env.split(",") if origin.strip()] or default_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://192.168.1.11:3000",
-    ],
-    allow_origin_regex=r"^https?://((localhost|127\.0\.0\.1)|((10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3})|([a-zA-Z0-9-]+\.)?ngrok-free\.(app|dev))(:\d+)?$",
+    allow_origins=allow_origins,
+    allow_origin_regex=r"^https?://((localhost|127\.0\.0\.1)|((10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3})|([a-zA-Z0-9-]+\.)?ngrok-free\.(app|dev)|([a-zA-Z0-9-]+\.)?up\.railway\.app)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
