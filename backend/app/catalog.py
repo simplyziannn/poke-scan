@@ -471,11 +471,24 @@ def _extract_label_price_fallback(html: str, label_pattern: str) -> Optional[flo
     return float(match.group(1).replace(",", ""))
 
 
+def _extract_full_guide_pipe_price(html: str, label_pattern: str) -> Optional[float]:
+    # Handles text/table mirror layout: "Grade 9  | $352.67" or "PSA 10: $1,350.07"
+    pattern = re.compile(
+        rf"{label_pattern}\s*(?:\||:)\s*\$(\d{{1,3}}(?:,\d{{3}})*(?:\.\d{{2}})?)",
+        re.IGNORECASE,
+    )
+    match = pattern.search(html)
+    if not match:
+        return None
+    return float(match.group(1).replace(",", ""))
+
+
 def _parse_ungraded_from_card_page(html: str) -> Optional[float]:
     return (
         _extract_price_from_label_value_cell(html, r"Ungraded")
         or _extract_row_scoped_price(html, r"Ungraded")
         or _extract_label_price_fallback(html, r"Ungraded")
+        or _extract_full_guide_pipe_price(html, r"Ungraded")
     )
 
 
@@ -484,6 +497,7 @@ def _parse_grade9_from_card_page(html: str) -> Optional[float]:
         _extract_price_from_label_value_cell(html, r"Grade\s*9(?!\s*\.?5)")
         or _extract_row_scoped_price(html, r"Grade\s*9(?!\s*\.?5)")
         or _extract_label_price_fallback(html, r"Grade\s*9(?!\s*\.?5)")
+        or _extract_full_guide_pipe_price(html, r"Grade\s*9(?!\s*\.?5)")
     )
 
 
@@ -492,6 +506,7 @@ def _parse_psa10_from_card_page(html: str) -> Optional[float]:
         _extract_price_from_label_value_cell(html, r"PSA\s*10")
         or _extract_row_scoped_price(html, r"PSA\s*10")
         or _extract_label_price_fallback(html, r"PSA\s*10")
+        or _extract_full_guide_pipe_price(html, r"PSA\s*10")
     )
 
 
